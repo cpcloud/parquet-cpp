@@ -339,9 +339,15 @@ if (NOT ARROW_FOUND)
     -DARROW_BUILD_TESTS=OFF)
 
   if ("$ENV{PARQUET_ARROW_VERSION}" STREQUAL "")
-    execute_process(COMMAND python "${PROJECT_SOURCE_DIR}/ci/latest_arrow_commit.py"
-            OUTPUT_VARIABLE ARROW_VERSION
-            ERROR_VARIABLE ARROW_VERSION_ERROR_MESSAGE)
+    if (MSVC)
+      set(LATEST_ARROW_COMMIT_COMMAND "${PROJECT_SOURCE_DIR}/ci/latest_arrow_commit.bat")
+    else()
+      set(LATEST_ARROW_COMMIT_COMMAND "${PROJECT_SOURCE_DIR}/ci/latest_arrow_commit.sh")
+    endif()
+    execute_process(
+      COMMAND "${LATEST_ARROW_COMMIT_COMMAND}"
+      OUTPUT_VARIABLE ARROW_VERSION
+      ERROR_VARIABLE ARROW_VERSION_ERROR_MESSAGE)
     if (NOT "${ARROW_VERSION_ERROR_MESSAGE}" STREQUAL "")
       message(FATAL_ERROR "error message: ${ARROW_VERSION_ERROR_MESSAGE}")
     endif()
