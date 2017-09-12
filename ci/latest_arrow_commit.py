@@ -16,6 +16,7 @@ if __name__ == '__main__':
         'git://github.com/apache/arrow',
         tmpdir,
     ])
-    os.chdir(tmpdir)
-    out = subprocess.check_output(['git', 'rev-parse', 'HEAD'])
+    out = subprocess.check_output([
+        'git', '--git-dir', os.path.join(tmpdir, '.git'), 'rev-parse', 'HEAD'
+    ])
     print(out.decode('utf8'))

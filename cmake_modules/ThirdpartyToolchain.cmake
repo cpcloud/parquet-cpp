@@ -339,11 +339,14 @@ if (NOT ARROW_FOUND)
     -DARROW_BUILD_TESTS=OFF)
 
   if ("$ENV{PARQUET_ARROW_VERSION}" STREQUAL "")
-    execute_process(COMMAND "${PROJECT_SOURCE_DIR}/ci/latest_arrow_commit.py"
+    execute_process(COMMAND python "${PROJECT_SOURCE_DIR}/ci/latest_arrow_commit.py"
             OUTPUT_VARIABLE ARROW_VERSION
             ERROR_VARIABLE ARROW_VERSION_ERROR_MESSAGE)
-    if (ARROW_VERSION_ERROR_MESSAGE)
-      message(FATAL_ERROR "${ARROW_VERSION_ERROR_MESSAGE}")
+    if (NOT "${ARROW_VERSION_ERROR_MESSAGE}" STREQUAL "")
+      message(FATAL_ERROR "error message: ${ARROW_VERSION_ERROR_MESSAGE}")
+    endif()
+    if ("${ARROW_VERSION}" STREQUAL "")
+      message(FATAL_ERROR "Unable to retrieve latest arrow commit: ${RESULT_VARIABLE}")
     endif()
   else()
     set(ARROW_VERSION "$ENV{PARQUET_ARROW_VERSION}")
