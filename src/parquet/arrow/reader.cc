@@ -29,6 +29,7 @@
 
 #include "arrow/api.h"
 #include "arrow/util/bit-util.h"
+#include "arrow/util/decimal.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/parallel.h"
 
@@ -874,6 +875,133 @@ struct TransferFunctor<
   }
 };
 
+template <typename T>
+static T BytesToInteger(const uint8_t* bytes, int32_t start, int32_t stop) {
+  T value = 0;
+
+  const auto unsigned_stop = static_cast<uint64_t>(stop);
+
+  for (int32_t i = start; i < stop; ++i) {
+    const uint64_t bits_to_shift = (unsigned_stop - i - 1) * CHAR_BIT;
+    const uint64_t byte_value = bytes[i];
+    const uint64_t shifted_value = byte_value << bits_to_shift;
+    value |= shifted_value;
+  }
+
+  return value;
+}
+
+static constexpr uint8_t kSignBitOfByte = 0x80;
+
+static constexpr int32_t kMinDecimalBytes = 1;
+static constexpr int32_t kMaxDecimalBytes = 16;
+
+/// \brief Convert a sequence of big-endian bytes to one int64_t (high bits) and one
+///        uint64_t (low bits).
+static void BytesToIntegerPair(const uint8_t* bytes, int32_t length, int64_t* high,
+                               uint64_t* low) {
+  DCHECK_GE(length, kMinDecimalBytes);
+  DCHECK_LE(length, kMaxDecimalBytes);
+
+  const bool is_negative = (bytes[0] & kSignBitOfByte) != 0;
+
+  if (is_negative) {
+    // sign extend if necessary - upper 64 bits get all ones, so do lower. we handle the
+    // the rest by computing the integer value and shifting + ORing the integer value with
+    // the sign extended upper bits of the lower 64 bits
+    *low = UINT64_MAX;
+    *high = static_cast<int64_t>(UINT64_MAX);  // -1, but easier to grok with UINT64_MAX
+  } else {
+    *low = 0ULL;
+    *high = 0LL;
+  }
+
+  if (length >= 1 && length <= 8) {
+    const auto used_low_bits_value = BytesToInteger<uint64_t>(bytes, 0, length);
+    *low <<= length * CHAR_BIT;
+    *low |= used_low_bits_value;
+  } else {  // we have a number that needs more than 64 bits
+    // high bytes
+    const auto used_high_bits_value = BytesToInteger<int64_t>(bytes, 0, length - 8);
+    *high <<= (length - 8) * CHAR_BIT;
+    *high |= used_high_bits_value;
+
+    // low bytes
+    *low = BytesToInteger<uint64_t>(bytes, length - 8, length);
+  }
+}
+
+/// \brief Convert an array of FixedLenByteArrays to an arrow::DecimalArray
+/// We do this by:
+/// 1. Creating a arrow::FixedSizeBinaryArray from the RecordReader's builder
+/// 2. Allocating a buffer for the arrow::DecimalArray
+/// 3. Converting the big-endian bytes in the FixedSizeBinaryArray to two integers
+///    representing the high and low bits of each decimal value.
+template <>
+struct TransferFunctor<::arrow::DecimalType, FLBAType> {
+  Status operator()(RecordReader* reader, MemoryPool* pool,
+                    const std::shared_ptr<::arrow::DataType>& type,
+                    std::shared_ptr<Array>* out) {
+    DCHECK_EQ(type->id(), ::arrow::Type::DECIMAL);
+
+    // Finish the built data into a temporary array
+    std::shared_ptr<Array> array;
+    RETURN_NOT_OK(reader->builder()->Finish(&array));
+    const auto& fixed_size_binary_array = static_cast<
+        const ::arrow::FixedSizeBinaryArray&>(*array);
+
+    // Get the byte width of the values in the FixedSizeBinaryArray. Most of the time
+    // this will be different from the decimal array width because we write the minimum
+    // number of bytes necessary to represent a given precision
+    const int32_t byte_width = static_cast<const ::arrow::FixedSizeBinaryType&>(
+        *fixed_size_binary_array.type()).byte_width();
+
+    // The byte width of each decimal value
+    const int32_t type_length = static_cast<const ::arrow::DecimalType&>(
+        *type).byte_width();
+
+    // number of elements in the entire array
+    const int64_t length = fixed_size_binary_array.length();
+
+    // allocate memory for the decimal array
+    std::shared_ptr<Buffer> data;
+    RETURN_NOT_OK(::arrow::AllocateBuffer(pool, length * type_length, &data));
+
+    // raw bytes that we can write to
+    uint8_t* out_ptr = data->mutable_data();
+
+    auto raw_bytes_to_decimal_bytes = [byte_width](
+	    const uint8_t* value, uint8_t* out_buf) {
+      // view the first 8 bytes as a signed 64-bit integer
+      auto high = reinterpret_cast<int64_t *>(out_buf);
+
+      // view the second 8 bytes as an unsigned 64-bit integer
+      auto low = reinterpret_cast<uint64_t *>(out_buf + sizeof(int64_t));
+
+      // Convert the fixed size binary array bytes into a Decimal128 compatible layout
+      BytesToIntegerPair(value, byte_width, high, low);
+    };
+
+    // convert each FixedSizeBinary value to valid decimal bytes
+    const int64_t null_count = fixed_size_binary_array.null_count();
+    if (null_count > 0) {
+      for (int64_t i = 0; i < length; ++i, out_ptr += type_length) {
+        if (!fixed_size_binary_array.IsNull(i)) {
+          raw_bytes_to_decimal_bytes(fixed_size_binary_array.GetValue(i), out_ptr);
+        }
+      }
+    } else {
+      for (int64_t i = 0; i < length; ++i, out_ptr += type_length) {
+        raw_bytes_to_decimal_bytes(fixed_size_binary_array.GetValue(i), out_ptr);
+      }
+    }
+
+    *out = std::make_shared<::arrow::DecimalArray>(
+        type, length, data, fixed_size_binary_array.null_bitmap(), null_count);
+    return Status::OK();
+  }
+};
+
 #define TRANSFER_DATA(ArrowType, ParquetType)                            \
   TransferFunctor<ArrowType, ParquetType> func;                          \
   RETURN_NOT_OK(func(record_reader_.get(), pool_, field_->type(), out)); \
@@ -932,6 +1060,7 @@ Status PrimitiveImpl::NextBatch(int64_t records_to_read, std::shared_ptr<Array>*
     TRANSFER_CASE(DATE32, ::arrow::Date32Type, Int32Type)
     TRANSFER_CASE(DATE64, ::arrow::Date64Type, Int32Type)
     TRANSFER_CASE(FIXED_SIZE_BINARY, ::arrow::FixedSizeBinaryType, FLBAType)
+    TRANSFER_CASE(DECIMAL, ::arrow::DecimalType, FLBAType)
     case ::arrow::Type::TIMESTAMP: {
       ::arrow::TimestampType* timestamp_type =
           static_cast<::arrow::TimestampType*>(field_->type().get());

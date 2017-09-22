@@ -85,6 +85,8 @@ ToParquetSchema(const ::arrow::Schema* arrow_schema, const WriterProperties& pro
                                                const WriterProperties& properties,
                                                std::shared_ptr<SchemaDescriptor>* out);
 
+int32_t PARQUET_EXPORT DecimalSize(int32_t precision);
+
 }  // namespace arrow
 
 }  // namespace parquet
