@@ -336,14 +336,29 @@ class PARQUET_EXPORT InMemoryOutputStream : public OutputStream {
       ::arrow::MemoryPool* pool = ::arrow::default_memory_pool(),
       int64_t initial_capacity = kInMemoryDefaultCapacity);
 
-  virtual ~InMemoryOutputStream();
+  ~InMemoryOutputStream() override;
 
   // Close is currently a no-op with the in-memory stream
-  virtual void Close() {}
+  void Close() override {}
 
-  virtual int64_t Tell();
+  int64_t Tell() override;
 
-  virtual void Write(const uint8_t* data, int64_t length);
+  void Write(const uint8_t* data, int64_t length) override;
+
+  template <typename Iterator>
+  void Write(const Iterator& begin, const Iterator& end) {
+    std::ptrdiff_t length = std::distance(begin, end);
+    if (size_ + length > capacity_) {
+      int64_t new_capacity = capacity_ * 2;
+      while (new_capacity < size_ + length) {
+        new_capacity *= 2;
+      }
+      PARQUET_THROW_NOT_OK(buffer_->Resize(new_capacity));
+      capacity_ = new_capacity;
+    }
+    std::copy(begin, end, Head());
+    size_ += length;
+  }
 
   // Clears the stream
   void Clear() { size_ = 0; }

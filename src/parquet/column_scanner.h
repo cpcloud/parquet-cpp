@@ -214,7 +214,8 @@ template <>
 inline void TypedScanner<ByteArrayType>::FormatValue(void* val, char* buffer, int bufsize,
                                                      int width) {
   std::string fmt = format_fwf<ByteArrayType>(width);
-  std::string result = ByteArrayToString(*reinterpret_cast<ByteArray*>(val));
+  std::string result =
+      ByteArrayToString(*reinterpret_cast<ByteArray<const uint8_t*>*>(val));
   snprintf(buffer, bufsize, fmt.c_str(), result.c_str());
 }
 
@@ -223,7 +224,7 @@ inline void TypedScanner<FLBAType>::FormatValue(void* val, char* buffer, int buf
                                                 int width) {
   std::string fmt = format_fwf<FLBAType>(width);
   std::string result = FixedLenByteArrayToString(
-      *reinterpret_cast<FixedLenByteArray*>(val), descr()->type_length());
+      *reinterpret_cast<FixedLenByteArray<const uint8_t*>*>(val));
   snprintf(buffer, bufsize, fmt.c_str(), result.c_str());
 }
 

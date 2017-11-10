@@ -172,10 +172,11 @@ class TypedRowGroupStatistics : public RowGroupStatistics {
   T min_;
   T max_;
   ::arrow::MemoryPool* pool_;
-  std::shared_ptr<CompareDefault<DType> > comparator_;
+  std::shared_ptr<CompareDefault<DType>> comparator_;
 
   void PlainEncode(const T& src, std::string* dst);
   void PlainDecode(const std::string& src, T* dst);
+
   void Copy(const T& src, T* dst, PoolBuffer* buffer);
 
   std::shared_ptr<PoolBuffer> min_buffer_, max_buffer_;
@@ -187,23 +188,24 @@ inline void TypedRowGroupStatistics<DType>::Copy(const T& src, T* dst, PoolBuffe
 }
 
 template <>
-inline void TypedRowGroupStatistics<FLBAType>::Copy(const FLBA& src, FLBA* dst,
+inline void TypedRowGroupStatistics<FLBAType>::Copy(const FLBA<const uint8_t*>& src,
+                                                    FLBA<const uint8_t*>* dst,
                                                     PoolBuffer* buffer) {
-  if (dst->ptr == src.ptr) return;
-  uint32_t len = descr_->type_length();
+  if (dst->begin() == src.begin()) return;
+  const auto len = static_cast<uint32_t>(descr_->type_length());
   PARQUET_THROW_NOT_OK(buffer->Resize(len, false));
-  std::memcpy(buffer->mutable_data(), src.ptr, len);
-  *dst = FLBA(buffer->data());
+  std::copy(src.begin(), src.end(), buffer->mutable_data());
+  *dst = FLBA<const uint8_t*>(buffer->data(), buffer->data() + len);
 }
 
 template <>
-inline void TypedRowGroupStatistics<ByteArrayType>::Copy(const ByteArray& src,
-                                                         ByteArray* dst,
-                                                         PoolBuffer* buffer) {
-  if (dst->ptr == src.ptr) return;
-  PARQUET_THROW_NOT_OK(buffer->Resize(src.len, false));
-  std::memcpy(buffer->mutable_data(), src.ptr, src.len);
-  *dst = ByteArray(src.len, buffer->data());
+inline void TypedRowGroupStatistics<ByteArrayType>::Copy(
+    const ByteArray<const uint8_t*>& src, ByteArray<const uint8_t*>* dst,
+    PoolBuffer* buffer) {
+  if (dst->begin() == src.begin()) return;
+  PARQUET_THROW_NOT_OK(buffer->Resize(src.size(), false));
+  std::copy(src.begin(), src.end(), buffer->mutable_data());
+  *dst = ByteArray<const uint8_t*>(buffer->data(), buffer->data() + src.size());
 }
 
 template <>

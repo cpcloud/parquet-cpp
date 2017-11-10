@@ -19,6 +19,7 @@
 #define PARQUET_UTIL_COMPARISON_H
 
 #include <algorithm>
+#include <type_traits>
 
 #include "parquet/exception.h"
 #include "parquet/schema.h"
@@ -28,117 +29,65 @@ namespace parquet {
 
 class PARQUET_EXPORT Comparator {
  public:
-  virtual ~Comparator() {}
+  virtual ~Comparator() = default;
   static std::shared_ptr<Comparator> Make(const ColumnDescriptor* descr);
 };
 
 // The default comparison is SIGNED
-template <typename DType>
+template <typename DType, bool is_signed = true>
 class PARQUET_EXPORT CompareDefault : public Comparator {
  public:
-  typedef typename DType::c_type T;
-  CompareDefault() {}
-  virtual ~CompareDefault() {}
-  virtual bool operator()(const T& a, const T& b) { return a < b; }
+  using T = typename DType::c_type;
+  bool operator()(const T& a, const T& b) const { return a < b; }
+};
+
+template <typename DType>
+class PARQUET_EXPORT CompareDefault<DType, false> : public Comparator {
+ public:
+  using T = typename DType::c_type;
+  using UnsignedType = typename std::make_unsigned<T>::type;
+  bool operator()(const T& a, const T& b) const {
+    return static_cast<UnsignedType>(a) < static_cast<UnsignedType>(b);
+  }
+};
+
+template <>
+class PARQUET_EXPORT CompareDefault<ByteArrayType, true> : public Comparator {
+ public:
+  bool operator()(const ByteArray<const int8_t*>& a,
+                  const ByteArray<const int8_t*>& b) const {
+    return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
+  }
+};
+
+template <>
+class PARQUET_EXPORT CompareDefault<ByteArrayType, false> : public Comparator {
+ public:
+  bool operator()(const ByteArray<const uint8_t*>& a,
+                  const ByteArray<const uint8_t*>& b) const {
+    return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
+  }
 };
 
 template <>
 class PARQUET_EXPORT CompareDefault<Int96Type> : public Comparator {
  public:
-  CompareDefault() {}
-  virtual ~CompareDefault() {}
-  virtual bool operator()(const Int96& a, const Int96& b) {
+  bool operator()(const Int96& a, const Int96& b) const {
     // Only the MSB bit is by Signed comparison
     // For little-endian, this is the last bit of Int96 type
-    const int32_t amsb = static_cast<const int32_t>(a.value[2]);
-    const int32_t bmsb = static_cast<const int32_t>(b.value[2]);
-    if (amsb != bmsb) {
-      return (amsb < bmsb);
-    } else if (a.value[1] != b.value[1]) {
-      return (a.value[1] < b.value[1]);
-    }
-    return (a.value[0] < b.value[0]);
+    const auto amsb = static_cast<int32_t>(a.value[2]);
+    const auto bmsb = static_cast<int32_t>(b.value[2]);
+
+    return (amsb != bmsb && amsb < bmsb) ||
+           (a.value[1] != b.value[1] && a.value[1] < b.value[1]) ||
+           (a.value[0] < b.value[0]);
   }
 };
 
 template <>
-class PARQUET_EXPORT CompareDefault<ByteArrayType> : public Comparator {
+class PARQUET_EXPORT CompareDefault<Int96Type, false> : public Comparator {
  public:
-  CompareDefault() {}
-  virtual ~CompareDefault() {}
-  virtual bool operator()(const ByteArray& a, const ByteArray& b) {
-    const int8_t* aptr = reinterpret_cast<const int8_t*>(a.ptr);
-    const int8_t* bptr = reinterpret_cast<const int8_t*>(b.ptr);
-    return std::lexicographical_compare(aptr, aptr + a.len, bptr, bptr + b.len);
-  }
-};
-
-template <>
-class PARQUET_EXPORT CompareDefault<FLBAType> : public Comparator {
- public:
-  explicit CompareDefault(int length) : type_length_(length) {}
-  virtual ~CompareDefault() {}
-  virtual bool operator()(const FLBA& a, const FLBA& b) {
-    const int8_t* aptr = reinterpret_cast<const int8_t*>(a.ptr);
-    const int8_t* bptr = reinterpret_cast<const int8_t*>(b.ptr);
-    return std::lexicographical_compare(aptr, aptr + type_length_, bptr,
-                                        bptr + type_length_);
-  }
-  int32_t type_length_;
-};
-
-typedef CompareDefault<BooleanType> CompareDefaultBoolean;
-typedef CompareDefault<Int32Type> CompareDefaultInt32;
-typedef CompareDefault<Int64Type> CompareDefaultInt64;
-typedef CompareDefault<Int96Type> CompareDefaultInt96;
-typedef CompareDefault<FloatType> CompareDefaultFloat;
-typedef CompareDefault<DoubleType> CompareDefaultDouble;
-typedef CompareDefault<ByteArrayType> CompareDefaultByteArray;
-typedef CompareDefault<FLBAType> CompareDefaultFLBA;
-
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wattributes"
-#endif
-
-PARQUET_EXTERN_TEMPLATE CompareDefault<BooleanType>;
-PARQUET_EXTERN_TEMPLATE CompareDefault<Int32Type>;
-PARQUET_EXTERN_TEMPLATE CompareDefault<Int64Type>;
-PARQUET_EXTERN_TEMPLATE CompareDefault<Int96Type>;
-PARQUET_EXTERN_TEMPLATE CompareDefault<FloatType>;
-PARQUET_EXTERN_TEMPLATE CompareDefault<DoubleType>;
-PARQUET_EXTERN_TEMPLATE CompareDefault<ByteArrayType>;
-PARQUET_EXTERN_TEMPLATE CompareDefault<FLBAType>;
-
-#if defined(__GNUC__) && !defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
-
-// Define Unsigned Comparators
-class PARQUET_EXPORT CompareUnsignedInt32 : public CompareDefaultInt32 {
- public:
-  virtual ~CompareUnsignedInt32() {}
-  bool operator()(const int32_t& a, const int32_t& b) override {
-    const uint32_t ua = a;
-    const uint32_t ub = b;
-    return (ua < ub);
-  }
-};
-
-class PARQUET_EXPORT CompareUnsignedInt64 : public CompareDefaultInt64 {
- public:
-  virtual ~CompareUnsignedInt64() {}
-  bool operator()(const int64_t& a, const int64_t& b) override {
-    const uint64_t ua = a;
-    const uint64_t ub = b;
-    return (ua < ub);
-  }
-};
-
-class PARQUET_EXPORT CompareUnsignedInt96 : public CompareDefaultInt96 {
- public:
-  virtual ~CompareUnsignedInt96() {}
-  bool operator()(const Int96& a, const Int96& b) override {
+  bool operator()(const Int96& a, const Int96& b) const {
     if (a.value[2] != b.value[2]) {
       return (a.value[2] < b.value[2]);
     } else if (a.value[1] != b.value[1]) {
@@ -148,28 +97,64 @@ class PARQUET_EXPORT CompareUnsignedInt96 : public CompareDefaultInt96 {
   }
 };
 
-class PARQUET_EXPORT CompareUnsignedByteArray : public CompareDefaultByteArray {
+template <>
+class PARQUET_EXPORT CompareDefault<FLBAType, true> : public Comparator {
  public:
-  virtual ~CompareUnsignedByteArray() {}
-  bool operator()(const ByteArray& a, const ByteArray& b) override {
-    const uint8_t* aptr = reinterpret_cast<const uint8_t*>(a.ptr);
-    const uint8_t* bptr = reinterpret_cast<const uint8_t*>(b.ptr);
-    return std::lexicographical_compare(aptr, aptr + a.len, bptr, bptr + b.len);
+  template <typename I,
+            typename = typename std::enable_if<
+                std::is_same<typename std::iterator_traits<I>::value_type,
+                             const int8_t*>::value,
+                I>::type>
+  bool operator()(const FixedLenByteArray<I>& a, const FixedLenByteArray<I>& b) const {
+    return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
   }
 };
 
-class PARQUET_EXPORT CompareUnsignedFLBA : public CompareDefaultFLBA {
+template <>
+class PARQUET_EXPORT CompareDefault<FLBAType, false> : public Comparator {
  public:
-  explicit CompareUnsignedFLBA(int length) : CompareDefaultFLBA(length) {}
-  virtual ~CompareUnsignedFLBA() {}
-  bool operator()(const FLBA& a, const FLBA& b) override {
-    const uint8_t* aptr = reinterpret_cast<const uint8_t*>(a.ptr);
-    const uint8_t* bptr = reinterpret_cast<const uint8_t*>(b.ptr);
-    return std::lexicographical_compare(aptr, aptr + type_length_, bptr,
-                                        bptr + type_length_);
+  template <typename I,
+            typename = typename std::enable_if<
+                std::is_same<typename std::iterator_traits<I>::value_type,
+                             const uint8_t*>::value,
+                I>::type>
+  bool operator()(const FixedLenByteArray<I>& a, const FixedLenByteArray<I>& b) const {
+    return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
   }
 };
 
+typedef CompareDefault<BooleanType, true> CompareDefaultBoolean;
+typedef CompareDefault<Int32Type, true> CompareDefaultInt32;
+typedef CompareDefault<Int32Type, false> CompareUnsignedInt32;
+typedef CompareDefault<Int64Type, true> CompareDefaultInt64;
+typedef CompareDefault<Int64Type, false> CompareUnsignedInt64;
+typedef CompareDefault<Int96Type, true> CompareDefaultInt96;
+typedef CompareDefault<Int96Type, false> CompareUnsignedInt96;
+typedef CompareDefault<FloatType> CompareDefaultFloat;
+typedef CompareDefault<DoubleType> CompareDefaultDouble;
+typedef CompareDefault<ByteArrayType, false> CompareDefaultByteArray;
+typedef CompareDefault<FLBAType, false> CompareDefaultFLBA;
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wattributes"
+#endif
+
+PARQUET_EXTERN_TEMPLATE CompareDefault<BooleanType, true>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<Int32Type, true>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<Int32Type, false>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<Int64Type, true>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<Int64Type, false>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<Int96Type, true>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<Int96Type, false>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<FloatType>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<DoubleType>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<ByteArrayType, false>;
+PARQUET_EXTERN_TEMPLATE CompareDefault<FLBAType, false>;
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 }  // namespace parquet
 
 #endif  // PARQUET_UTIL_COMPARISON_H

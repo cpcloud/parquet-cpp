@@ -423,21 +423,12 @@ InMemoryOutputStream::InMemoryOutputStream(MemoryPool* pool, int64_t initial_cap
   buffer_ = AllocateBuffer(pool, initial_capacity);
 }
 
-InMemoryOutputStream::~InMemoryOutputStream() {}
+InMemoryOutputStream::~InMemoryOutputStream() = default;
 
 uint8_t* InMemoryOutputStream::Head() { return buffer_->mutable_data() + size_; }
 
 void InMemoryOutputStream::Write(const uint8_t* data, int64_t length) {
-  if (size_ + length > capacity_) {
-    int64_t new_capacity = capacity_ * 2;
-    while (new_capacity < size_ + length) {
-      new_capacity *= 2;
-    }
-    PARQUET_THROW_NOT_OK(buffer_->Resize(new_capacity));
-    capacity_ = new_capacity;
-  }
-  memcpy(Head(), data, length);
-  size_ += length;
+  return Write(data, data + length);
 }
 
 int64_t InMemoryOutputStream::Tell() { return size_; }

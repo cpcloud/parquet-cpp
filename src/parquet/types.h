@@ -21,8 +21,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <sstream>
 #include <string>
+#include <tuple>
 
 #include "arrow/util/compiler-util.h"
 
@@ -131,28 +133,45 @@ struct SortOrder {
 
 // ----------------------------------------------------------------------
 
-struct ByteArray {
-  ByteArray() : len(0), ptr(nullptr) {}
-  ByteArray(uint32_t len, const uint8_t* ptr) : len(len), ptr(ptr) {}
-  uint32_t len;
-  const uint8_t* ptr;
+template <typename Iterator = const uint8_t*>
+class ByteArray {
+ public:
+  explicit ByteArray(Iterator begin, Iterator end) : begin_(begin), end_(end) {}
+
+  std::ptrdiff_t size() const { return std::distance(begin_, end_); }
+
+  Iterator begin() const { return begin_; }
+  Iterator end() const { return end_; }
 
   bool operator==(const ByteArray& other) const {
-    return this->len == other.len && 0 == memcmp(this->ptr, other.ptr, this->len);
+    return std::equal(begin(), end(), other.begin());
   }
 
   bool operator!=(const ByteArray& other) const {
-    return this->len != other.len || 0 != memcmp(this->ptr, other.ptr, this->len);
+    return !std::equal(begin(), end(), other.begin());
   }
+
+ private:
+  Iterator begin_;
+  Iterator end_;
 };
 
-struct FixedLenByteArray {
-  FixedLenByteArray() : ptr(nullptr) {}
-  explicit FixedLenByteArray(const uint8_t* ptr) : ptr(ptr) {}
-  const uint8_t* ptr;
+template <typename Iterator = const uint8_t*>
+class FixedLenByteArray {
+ public:
+  explicit FixedLenByteArray(Iterator begin, Iterator end) : begin_(begin), end_(end) {}
+
+  std::ptrdiff_t size() const { return std::distance(begin_, end_); }
+  Iterator begin() const { return begin_; }
+  Iterator end() const { return end_; }
+
+ private:
+  Iterator begin_;
+  Iterator end_;
 };
 
-typedef FixedLenByteArray FLBA;
+template <typename Iterator>
+using FLBA = FixedLenByteArray<Iterator>;
 
 MANUALLY_ALIGNED_STRUCT(1) Int96 {
   uint32_t value[3];
@@ -165,33 +184,35 @@ MANUALLY_ALIGNED_STRUCT(1) Int96 {
 };
 STRUCT_END(Int96, 12);
 
-static inline std::string ByteArrayToString(const ByteArray& a) {
-  return std::string(reinterpret_cast<const char*>(a.ptr), a.len);
+template <typename T>
+static inline std::string ByteArrayToString(const ByteArray<T>& a) {
+  return std::string(a.begin(), a.end());
 }
 
 static inline std::string Int96ToString(const Int96& a) {
   std::stringstream result;
-  for (int i = 0; i < 3; i++) {
-    result << a.value[i] << " ";
+  for (const auto& value : a.value) {
+    result << value << " ";
   }
   return result.str();
 }
 
-static inline std::string FixedLenByteArrayToString(const FixedLenByteArray& a, int len) {
-  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(a.ptr);
+template <typename T>
+static inline std::string FixedLenByteArrayToString(const FixedLenByteArray<T>& bytes) {
   std::stringstream result;
-  for (int i = 0; i < len; i++) {
-    result << (uint32_t)bytes[i] << " ";
+  for (const auto& byte : bytes) {
+    result << static_cast<uint32_t>(byte) << " ";
   }
   return result.str();
 }
 
-static inline int ByteCompare(const ByteArray& x1, const ByteArray& x2) {
-  uint32_t len = std::min(x1.len, x2.len);
-  int cmp = memcmp(x1.ptr, x2.ptr, len);
+template <typename T>
+static inline int ByteCompare(const ByteArray<T>& x1, const ByteArray<T>& x2) {
+  const auto len = static_cast<uint32_t>(std::min(x1.size(), x2.size()));
+  int cmp = memcmp(x1.begin(), x2.begin(), len);
   if (cmp != 0) return cmp;
-  if (len < x1.len) return 1;
-  if (len < x2.len) return -1;
+  if (len < x1.size()) return 1;
+  if (len < x2.size()) return -1;
   return 0;
 }
 
@@ -248,17 +269,17 @@ struct type_traits<Type::DOUBLE> {
 
 template <>
 struct type_traits<Type::BYTE_ARRAY> {
-  typedef ByteArray value_type;
+  typedef ByteArray<const uint8_t*> value_type;
 
-  static constexpr int value_byte_size = sizeof(ByteArray);
+  static constexpr int value_byte_size = sizeof(value_type);
   static constexpr const char* printf_code = "s";
 };
 
 template <>
 struct type_traits<Type::FIXED_LEN_BYTE_ARRAY> {
-  typedef FixedLenByteArray value_type;
+  typedef FixedLenByteArray<const uint8_t*> value_type;
 
-  static constexpr int value_byte_size = sizeof(FixedLenByteArray);
+  static constexpr int value_byte_size = sizeof(value_type);
   static constexpr const char* printf_code = "s";
 };
 

@@ -721,9 +721,10 @@ template <>
 Status FileWriter::Impl::TypedWriteBatch<ByteArrayType, ::arrow::BinaryType>(
     ColumnWriter* column_writer, const std::shared_ptr<Array>& array, int64_t num_levels,
     const int16_t* def_levels, const int16_t* rep_levels) {
-  RETURN_NOT_OK(data_buffer_.Resize(array->length() * sizeof(ByteArray)));
+  RETURN_NOT_OK(data_buffer_.Resize(array->length() * sizeof(ByteArray<const uint8_t*>)));
   auto data = static_cast<const BinaryArray*>(array.get());
-  auto buffer_ptr = reinterpret_cast<ByteArray*>(data_buffer_.mutable_data());
+  auto buffer_ptr =
+      reinterpret_cast<ByteArray<const uint8_t*>*>(data_buffer_.mutable_data());
   // In the case of an array consisting of only empty strings or all null,
   // data->data() points already to a nullptr, thus data->data()->data() will
   // segfault.
@@ -740,15 +741,16 @@ Status FileWriter::Impl::TypedWriteBatch<ByteArrayType, ::arrow::BinaryType>(
   if (writer->descr()->schema_node()->is_required() || (data->null_count() == 0)) {
     // no nulls, just dump the data
     for (int64_t i = 0; i < data->length(); i++) {
-      buffer_ptr[i] =
-          ByteArray(value_offset[i + 1] - value_offset[i], data_ptr + value_offset[i]);
+      const int32_t n = value_offset[i + 1] - value_offset[i];
+      buffer_ptr[i] = ByteArray<const uint8_t*>(data_ptr + value_offset[i], data_ptr + n);
     }
   } else {
     int buffer_idx = 0;
     for (int64_t i = 0; i < data->length(); i++) {
       if (!data->IsNull(i)) {
+        const int32_t n = value_offset[i + 1] - value_offset[i];
         buffer_ptr[buffer_idx++] =
-            ByteArray(value_offset[i + 1] - value_offset[i], data_ptr + value_offset[i]);
+            ByteArray<const uint8_t*>(data_ptr + value_offset[i], data_ptr + n);
       }
     }
   }
@@ -762,11 +764,13 @@ template <>
 Status FileWriter::Impl::TypedWriteBatch<FLBAType, ::arrow::FixedSizeBinaryType>(
     ColumnWriter* column_writer, const std::shared_ptr<Array>& array, int64_t num_levels,
     const int16_t* def_levels, const int16_t* rep_levels) {
-  RETURN_NOT_OK(data_buffer_.Resize(array->length() * sizeof(FLBA), false));
+  RETURN_NOT_OK(data_buffer_.Resize(
+      array->length() * sizeof(FixedLenByteArray<const uint8_t*>), false));
   const auto& data = static_cast<const FixedSizeBinaryArray&>(*array);
   const int64_t length = data.length();
+  const int32_t byte_width = data.byte_width();
 
-  auto buffer_ptr = reinterpret_cast<FLBA*>(data_buffer_.mutable_data());
+  auto buffer_ptr = reinterpret_cast<FLBA<const uint8_t*>*>(data_buffer_.mutable_data());
 
   auto writer = reinterpret_cast<TypedColumnWriter<FLBAType>*>(column_writer);
 
@@ -774,13 +778,16 @@ Status FileWriter::Impl::TypedWriteBatch<FLBAType, ::arrow::FixedSizeBinaryType>
     // no nulls, just dump the data
     // todo(advancedxy): use a writeBatch to avoid this step
     for (int64_t i = 0; i < length; i++) {
-      buffer_ptr[i] = FixedLenByteArray(data.GetValue(i));
+      const uint8_t* begin = data.GetValue(i);
+      buffer_ptr[i] = FixedLenByteArray<const uint8_t*>(begin, begin + byte_width);
     }
   } else {
     int buffer_idx = 0;
     for (int64_t i = 0; i < length; i++) {
       if (!data.IsNull(i)) {
-        buffer_ptr[buffer_idx++] = FixedLenByteArray(data.GetValue(i));
+        const uint8_t* begin = data.GetValue(i);
+        buffer_ptr[buffer_idx++] =
+            FixedLenByteArray<const uint8_t*>(begin, begin + byte_width);
       }
     }
   }
@@ -797,40 +804,35 @@ Status FileWriter::Impl::TypedWriteBatch<FLBAType, ::arrow::DecimalType>(
   const auto& data = static_cast<const DecimalArray&>(*array);
   const int64_t length = data.length();
 
-  std::vector<uint64_t> big_endian_values(static_cast<size_t>(length) * 2);
-
-  RETURN_NOT_OK(data_buffer_.Resize(length * sizeof(FLBA), false));
-  auto buffer_ptr = reinterpret_cast<FLBA*>(data_buffer_.mutable_data());
+  using DecimalByteArray = FLBA<std::reverse_iterator<const uint8_t*>>;
+  RETURN_NOT_OK(data_buffer_.Resize(length * sizeof(DecimalByteArray), false));
+  auto buffer_ptr = reinterpret_cast<DecimalByteArray*>(data_buffer_.mutable_data());
 
   auto writer = reinterpret_cast<TypedColumnWriter<FLBAType>*>(column_writer);
 
   const auto& decimal_type = static_cast<const ::arrow::DecimalType&>(*data.type());
-  const int32_t offset =
-      decimal_type.byte_width() - DecimalSize(decimal_type.precision());
+  const int32_t byte_width = decimal_type.byte_width();
+  const int32_t offset = byte_width - DecimalSize(decimal_type.precision());
 
   if (writer->descr()->schema_node()->is_required() || data.null_count() == 0) {
     // no nulls, just dump the data
     // todo(advancedxy): use a writeBatch to avoid this step
-    for (int64_t i = 0, j = 0; i < length; ++i, j += 2) {
-      auto unsigned_64_bit = reinterpret_cast<const uint64_t*>(data.GetValue(i));
-      big_endian_values[j] = ::arrow::BitUtil::ToBigEndian(unsigned_64_bit[1]);
-      big_endian_values[j + 1] = ::arrow::BitUtil::ToBigEndian(unsigned_64_bit[0]);
-      buffer_ptr[i] = FixedLenByteArray(
-          reinterpret_cast<const uint8_t*>(&big_endian_values[j]) + offset);
+    for (int64_t i = 0; i < length; ++i) {
+      const uint8_t* begin = data.GetValue(i);
+      const uint8_t* end = begin + byte_width - offset;
+      buffer_ptr[i] = DecimalByteArray(std::reverse_iterator<const uint8_t*>(end),
+                                       std::reverse_iterator<const uint8_t*>(begin));
     }
   } else {
     int32_t buffer_idx = 0;
-    int32_t j = 0;
 
     for (int64_t i = 0; i < length; ++i) {
       if (!data.IsNull(i)) {
-        auto unsigned_64_bit = reinterpret_cast<const uint64_t*>(data.GetValue(i));
-        big_endian_values[j] = ::arrow::BitUtil::ToBigEndian(unsigned_64_bit[1]);
-        big_endian_values[j + 1] = ::arrow::BitUtil::ToBigEndian(unsigned_64_bit[0]);
-        buffer_ptr[buffer_idx] = FixedLenByteArray(
-            reinterpret_cast<const uint8_t*>(&big_endian_values[j]) + offset);
-        ++buffer_idx;
-        j += 2;
+        const uint8_t* begin = data.GetValue(i);
+        const uint8_t* end = begin + byte_width - offset;
+        buffer_ptr[buffer_idx++] =
+            DecimalByteArray(std::reverse_iterator<const uint8_t*>(end),
+                             std::reverse_iterator<const uint8_t*>(begin));
       }
     }
   }

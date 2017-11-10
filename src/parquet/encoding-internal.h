@@ -92,15 +92,14 @@ inline int DecodePlain(const uint8_t* data, int64_t data_size, int num_values,
 // Template specialization for BYTE_ARRAY. The written values do not own their
 // own data.
 template <>
-inline int DecodePlain<ByteArray>(const uint8_t* data, int64_t data_size, int num_values,
-                                  int type_length, ByteArray* out) {
+inline int DecodePlain<ByteArray<const uint8_t*>>(const uint8_t* data, int64_t data_size,
+                                     int num_values, int type_length, ByteArray<const uint8_t*>* out) {
   int bytes_decoded = 0;
-  int increment;
-  for (int i = 0; i < num_values; ++i) {
-    uint32_t len = out[i].len = *reinterpret_cast<const uint32_t*>(data);
-    increment = sizeof(uint32_t) + len;
+  for (int i = 0, increment = 0; i < num_values; ++i) {
+    uint32_t len = *reinterpret_cast<const uint32_t*>(data);
+    increment = sizeof(len) + len;
     if (data_size < increment) ParquetException::EofException();
-    out[i].ptr = data + sizeof(uint32_t);
+    out[i] = ByteArray<const uint8_t*>(data + sizeof(len), data + increment);
     data += increment;
     data_size -= increment;
     bytes_decoded += increment;
@@ -111,15 +110,15 @@ inline int DecodePlain<ByteArray>(const uint8_t* data, int64_t data_size, int nu
 // Template specialization for FIXED_LEN_BYTE_ARRAY. The written values do not
 // own their own data.
 template <>
-inline int DecodePlain<FixedLenByteArray>(const uint8_t* data, int64_t data_size,
-                                          int num_values, int type_length,
-                                          FixedLenByteArray* out) {
+inline int DecodePlain<FixedLenByteArray<const uint8_t*>>(const uint8_t* data, int64_t data_size,
+                                             int num_values, int type_length,
+                                             FixedLenByteArray<const uint8_t*>* out) {
   int bytes_to_decode = type_length * num_values;
   if (data_size < bytes_to_decode) {
     ParquetException::EofException();
   }
   for (int i = 0; i < num_values; ++i) {
-    out[i].ptr = data;
+    out[i] = FixedLenByteArray<const uint8_t*>(data, data + type_length);
     data += type_length;
     data_size -= type_length;
   }
@@ -288,26 +287,26 @@ inline void PlainEncoder<DType>::Put(const T* buffer, int num_values) {
 }
 
 template <>
-inline void PlainEncoder<ByteArrayType>::Put(const ByteArray* src, int num_values) {
+inline void PlainEncoder<ByteArrayType>::Put(const ByteArray<const uint8_t*>* src, int num_values) {
   for (int i = 0; i < num_values; ++i) {
     // Write the result to the output stream
-    values_sink_->Write(reinterpret_cast<const uint8_t*>(&src[i].len), sizeof(uint32_t));
-    if (src[i].len > 0) {
-      DCHECK(nullptr != src[i].ptr) << "Value ptr cannot be NULL";
+    const auto size = src[i].size();
+    values_sink_->Write(reinterpret_cast<const uint8_t*>(&size), sizeof(uint32_t));
+    if (src[i].size() > 0) {
+      DCHECK_NE(nullptr, src[i].begin()) << "Value ptr cannot be NULL";
     }
-    values_sink_->Write(reinterpret_cast<const uint8_t*>(src[i].ptr), src[i].len);
+    values_sink_->Write(src[i].begin(), src[i].end());
   }
 }
 
 template <>
-inline void PlainEncoder<FLBAType>::Put(const FixedLenByteArray* src, int num_values) {
+inline void PlainEncoder<FLBAType>::Put(const FixedLenByteArray<const uint8_t*>* src, int num_values) {
   for (int i = 0; i < num_values; ++i) {
     // Write the result to the output stream
     if (descr_->type_length() > 0) {
-      DCHECK(nullptr != src[i].ptr) << "Value ptr cannot be NULL";
+      DCHECK_NE(nullptr, src[i].begin()) << "Value ptr cannot be NULL";
     }
-    values_sink_->Write(reinterpret_cast<const uint8_t*>(src[i].ptr),
-                        descr_->type_length());
+    values_sink_->Write(src[i].begin(), src[i].end());
   }
 }
 
@@ -396,16 +395,17 @@ inline void DictionaryDecoder<ByteArrayType>::SetDict(
 
   int total_size = 0;
   for (int i = 0; i < num_dictionary_values; ++i) {
-    total_size += dictionary_[i].len;
+    total_size += dictionary_[i].size();
   }
   PARQUET_THROW_NOT_OK(byte_array_data_->Resize(total_size, false));
   int offset = 0;
 
   uint8_t* bytes_data = byte_array_data_->mutable_data();
   for (int i = 0; i < num_dictionary_values; ++i) {
-    memcpy(bytes_data + offset, dictionary_[i].ptr, dictionary_[i].len);
-    dictionary_[i].ptr = bytes_data + offset;
-    offset += dictionary_[i].len;
+    std::copy(dictionary_[i].begin(), dictionary_[i].end(), bytes_data + offset);
+    const auto size = dictionary_[i].size();
+    dictionary_[i] = ByteArray<const uint8_t*>(bytes_data + offset, bytes_data + size);
+    offset += size;
   }
 }
 
@@ -421,8 +421,9 @@ inline void DictionaryDecoder<FLBAType>::SetDict(Decoder<FLBAType>* dictionary) 
   PARQUET_THROW_NOT_OK(byte_array_data_->Resize(total_size, false));
   uint8_t* bytes_data = byte_array_data_->mutable_data();
   for (int32_t i = 0, offset = 0; i < num_dictionary_values; ++i, offset += fixed_len) {
-    memcpy(bytes_data + offset, dictionary_[i].ptr, fixed_len);
-    dictionary_[i].ptr = bytes_data + offset;
+    std::copy(dictionary_[i].begin(), dictionary_[i].end(), bytes_data + offset);
+    const auto size = dictionary_[i].size();
+    dictionary_[i] = ByteArray<const uint8_t*>(bytes_data + offset, bytes_data + offset + size);
   }
 }
 
@@ -583,6 +584,9 @@ class DictEncoder : public Encoder<DType> {
   /// Hash function for mapping a value to a bucket.
   inline int Hash(const T& value) const;
 
+  template <typename U>
+  inline int Hash(const T<U>& value) const;
+
   /// Adds value to the hash table and updates dict_encoded_size_
   void AddDictKey(const T& value);
 };
@@ -593,19 +597,21 @@ inline int DictEncoder<DType>::Hash(const typename DType::c_type& value) const {
 }
 
 template <>
-inline int DictEncoder<ByteArrayType>::Hash(const ByteArray& value) const {
-  if (value.len > 0) {
-    DCHECK_NE(nullptr, value.ptr) << "Value ptr cannot be NULL";
+template <typename U>
+inline int DictEncoder<ByteArrayType>::Hash(const ByteArray<U>& value) const {
+  if (value.size() > 0) {
+    DCHECK_NE(nullptr, value.begin()) << "Value ptr cannot be NULL";
   }
-  return HashUtil::Hash(value.ptr, value.len, 0);
+  return HashUtil::Hash(value.begin(), value.size(), 0);
 }
 
 template <>
-inline int DictEncoder<FLBAType>::Hash(const FixedLenByteArray& value) const {
+template <typename T>
+inline int DictEncoder<FLBAType>::Hash(const FixedLenByteArray<T>& value) const {
   if (type_length_ > 0) {
     DCHECK_NE(nullptr, value.ptr) << "Value ptr cannot be NULL";
   }
-  return HashUtil::Hash(value.ptr, type_length_, 0);
+  return HashUtil::Hash(value.begin(), type_length_, 0);
 }
 
 template <typename DType>
@@ -615,9 +621,10 @@ inline bool DictEncoder<DType>::SlotDifferent(const typename DType::c_type& v,
 }
 
 template <>
-inline bool DictEncoder<FLBAType>::SlotDifferent(const FixedLenByteArray& v,
+template <typename T>
+inline bool DictEncoder<FLBAType>::SlotDifferent(const FixedLenByteArray<T>& v,
                                                  hash_slot_t slot) {
-  return 0 != memcmp(v.ptr, uniques_[slot].ptr, type_length_);
+  return std::equal(v.begin(), v.end(), uniques_[slot].begin());
 }
 
 template <typename DType>
@@ -692,25 +699,27 @@ inline void DictEncoder<DType>::AddDictKey(const typename DType::c_type& v) {
 }
 
 template <>
-inline void DictEncoder<ByteArrayType>::AddDictKey(const ByteArray& v) {
+template <typename T>
+inline void DictEncoder<ByteArrayType>::AddDictKey(const ByteArray<T>& v) {
   uint8_t* heap = pool_->Allocate(v.len);
   if (ARROW_PREDICT_FALSE(v.len > 0 && heap == nullptr)) {
     throw ParquetException("out of memory");
   }
-  memcpy(heap, v.ptr, v.len);
-  uniques_.push_back(ByteArray(v.len, heap));
-  dict_encoded_size_ += v.len + sizeof(uint32_t);
+  std::copy(v.begin(), v.end(), heap);
+  uniques_.push_back(ByteArray(heap, heap + v.size()));
+  dict_encoded_size_ += v.size() + sizeof(uint32_t);
 }
 
 template <>
-inline void DictEncoder<FLBAType>::AddDictKey(const FixedLenByteArray& v) {
-  uint8_t* heap = pool_->Allocate(type_length_);
+template <typename T>
+inline void DictEncoder<FLBAType>::AddDictKey(const FixedLenByteArray<T>& v) {
+  uint8_t* heap = pool_->Allocate(v.size());
   if (ARROW_PREDICT_FALSE(type_length_ > 0 && heap == nullptr)) {
     throw ParquetException("out of memory");
   }
-  memcpy(heap, v.ptr, type_length_);
+  std::copy(v.begin(), v.end(), heap);
 
-  uniques_.push_back(FixedLenByteArray(heap));
+  uniques_.push_back(FixedLenByteArray(heap, heap + v.size()));
   dict_encoded_size_ += type_length_;
 }
 
@@ -937,7 +946,7 @@ class DeltaByteArrayDecoder : public Decoder<ByteArrayType> {
 
   // TODO: this doesn't work and requires memory management. We need to allocate
   // new strings to store the results.
-  virtual int Decode(ByteArray* buffer, int max_values) {
+  virtual int Decode(ByteArray<const uint8_t*>* buffer, int max_values) {
     max_values = std::min(max_values, num_values_);
     for (int i = 0; i < max_values; ++i) {
       int prefix_len = 0;
